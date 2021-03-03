@@ -17,36 +17,28 @@ const pool = new Pool({
 async function load() {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
     let drugsUrl =
-      "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3";
-    //   "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=425&pagesize=100";
+      // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3";
+      // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=291&pagesize=100";
+
+      "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=108&pagesize=100";
     while (drugsUrl != "null") {
+      await client.query("BEGIN");
+
       let response = await fetch(drugsUrl);
       const result = await response.json();
 
-      const insertDrugText = `INSERT INTO 
-      "Lookup_Drug_List"(
-          "sDrugID", 
-          "sDrug",
-          "dDateTime", 
-          "dModifiedDate") 
-      VALUES (
-        $1, 
-        $2, 
-        current_timestamp, 
-        current_timestamp)
-      ON CONFLICT DO NOTHING;`;
-
       result.data.forEach((drug) => {
-        const insertDrugValues = [drug.setid, drug.title];
-        client.query(insertDrugText, insertDrugValues);
         drugInfo(drug.setid, client);
       });
+      await client.query("COMMIT");
+      console.log(`COMMIT ${drugsUrl}`);
+
       drugsUrl = result.metadata.next_page_url;
     }
+
     await client.query("COMMIT");
-    console.log("COMMIT !!!!");
+    console.log(`COMMIT !!!`);
   } catch (e) {
     await client.query("ROLLBACK");
     console.log("ROLLBACK");
@@ -57,6 +49,18 @@ async function load() {
 }
 
 function drugInfo(setid, client) {
+  const insertDrugText = `INSERT INTO 
+            "Lookup_Drug_List"(
+                "sDrugID", 
+                "sDrug",
+                "dDateTime", 
+                "dModifiedDate") 
+            VALUES (
+              $1, 
+              $2, 
+              current_timestamp, 
+              current_timestamp)
+            ON CONFLICT DO NOTHING;`;
   const insertActiveIngredientText = `INSERT INTO 
             "Lookup_Active_Ingredient"(
                 "sActiveIngredient", 
@@ -88,29 +92,65 @@ function drugInfo(setid, client) {
       });
       res.on("end", () => {
         parseString(data, function (err, result) {
-          var nodes = jp.query(result, `$..activeMoiety`);
-          for (var i = 0; i < nodes.length; i++) {
-            nodes[i].forEach((entry) => {
-              if (entry.code) {
-                const insertActiveIngredientValues = [entry.name[0]];
-                client.query(
-                  insertActiveIngredientText,
-                  insertActiveIngredientValues
-                );
-                const insertDrugIngredientValues = [setid, entry.name[0]];
-                client.query(
-                  insertDrugIngredientText,
-                  insertDrugIngredientValues
-                );
-                console.log(entry.code[0].$.code, entry.name[0]);
+          try {
+            // const drugName = result.document.component[0].structuredBody[0]
+            //   .component[0].section[0].subject
+            //   ? result.document.component[0].structuredBody[0].component[0]
+            //       .section[0].subject[0].manufacturedProduct[0]
+            //       .manufacturedProduct[0].name[0]
+            //   : result.document.component[0].structuredBody[0].component[1]
+            //       .section[0].subject[0].manufacturedProduct[0]
+            //       .manufacturedProduct[0].name[0];
+
+            const component = result.document.component[0].structuredBody[0].component.find(
+              (comp) => {
+                return comp.section[0].subject != undefined;
               }
-            });
+            );
+
+            const drugName =
+              component.section[0].subject[0].manufacturedProduct[0]
+                .manufacturedProduct[0].name[0];
+            // console.log(
+            //   drugName._
+            //     ? drugName._.trim()
+            //     : drugName.trim()
+            // );
+
+            const insertDrugValues = [
+              setid,
+              drugName._ ? drugName._.trim() : drugName.trim(),
+            ];
+            var nodes = jp.query(result, `$..activeMoiety`);
+
+            client.query(insertDrugText, insertDrugValues);
+
+            for (var i = 0; i < nodes.length; i++) {
+              nodes[i].forEach((entry) => {
+                if (entry.code) {
+                  if (entry.name[0].length > 100) console.log(entry.name[0]);
+                  const insertActiveIngredientValues = [entry.name[0]];
+                  client.query(
+                    insertActiveIngredientText,
+                    insertActiveIngredientValues
+                  );
+                  const insertDrugIngredientValues = [setid, entry.name[0]];
+                  client.query(
+                    insertDrugIngredientText,
+                    insertDrugIngredientValues
+                  );
+                  console.log(entry.code[0].$.code, entry.name[0]);
+                }
+              });
+            }
+          } catch (error) {
+            console.log(error, setid);
           }
         });
       });
     })
     .on("error", (err) => {
-      console.log(err.message);
+      console.log(err);
     });
 }
 
