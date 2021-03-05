@@ -3,8 +3,28 @@ const parseString = require("xml2js").parseString;
 const jp = require("jsonpath");
 const fetch = require("node-fetch");
 // fs = require("fs");
+// var request = require('request');
 
 const { Pool, Client } = require("pg");
+
+async function processArray(array, drugUrl, client) {
+  for (const drug of array) {
+    await drugInfo(drug.setid, client);
+  }
+  // await client.query("COMMIT");
+  console.log(`process ${drugUrl}`);
+}
+
+function compareSets(array1, array2) {
+  const set1 = new Set(array1);
+  const set2 = new Set(array2);
+
+  const compareSet = new Set([...set1, ...set2]);
+  const isSetEqual =
+    compareSet.size === set2.size && compareSet.size === set1.size;
+
+  return isSetEqual;
+}
 
 const pool = new Pool({
   user: "pgAdmin",
@@ -18,27 +38,23 @@ async function load() {
   const client = await pool.connect();
   try {
     let drugsUrl =
-      // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3";
-      // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=291&pagesize=100";
+      "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3";
+    // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=291&pagesize=100";
 
-      "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=108&pagesize=100";
+    // "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?doctype=34391-3&page=108&pagesize=100";
     while (drugsUrl != "null") {
-      await client.query("BEGIN");
-
       let response = await fetch(drugsUrl);
       const result = await response.json();
 
-      result.data.forEach((drug) => {
-        drugInfo(drug.setid, client);
-      });
-      await client.query("COMMIT");
-      console.log(`COMMIT ${drugsUrl}`);
+      await processArray(result.data, drugsUrl, client);
 
       drugsUrl = result.metadata.next_page_url;
     }
 
     await client.query("COMMIT");
     console.log(`COMMIT !!!`);
+
+    // drugInfo("7b3da447-8e7c-2aaa-e053-2a91aa0a2821", client);
   } catch (e) {
     await client.query("ROLLBACK");
     console.log("ROLLBACK");
@@ -91,7 +107,7 @@ function drugInfo(setid, client) {
         data += chunk;
       });
       res.on("end", () => {
-        parseString(data, function (err, result) {
+        parseString(data, async function (err, result) {
           try {
             // const drugName = result.document.component[0].structuredBody[0]
             //   .component[0].section[0].subject
@@ -117,31 +133,78 @@ function drugInfo(setid, client) {
             //     : drugName.trim()
             // );
 
-            const insertDrugValues = [
-              setid,
-              drugName._ ? drugName._.trim() : drugName.trim(),
-            ];
-            var nodes = jp.query(result, `$..activeMoiety`);
+            // console.log(drugName);
 
-            client.query(insertDrugText, insertDrugValues);
+            const drugNameTrim = drugName._
+              ? drugName._.trim().toLowerCase()
+              : drugName.trim().toLowerCase();
 
-            for (var i = 0; i < nodes.length; i++) {
-              nodes[i].forEach((entry) => {
-                if (entry.code) {
-                  if (entry.name[0].length > 100) console.log(entry.name[0]);
-                  const insertActiveIngredientValues = [entry.name[0]];
-                  client.query(
+            var nodes = jp
+              .query(result, `$..activeMoiety`)
+              .filter((node) => {
+                return node[0].code ? true : false;
+              })
+              .map((node) => {
+                return node[0].name[0].trim().toLowerCase();
+              });
+
+            // console.log(nodes);
+            selectIngredients = `select 
+              lower("sActiveIngredient") as "sActiveIngredient", 
+              DI."sDrugID" 
+            from 
+              "Lookup_Drug_List" as DL 
+            inner join 
+              "Lookup_Drug_Ingredients" as DI 
+                on DI."sDrugID" = DL."sDrugID" 
+            inner join 
+              "Lookup_Active_Ingredient" as AI
+                on AI."sRowID" = DI."sIngredientID"
+            where 
+              LOWER(DL."sDrug") = '${drugNameTrim}';`;
+            const res = await client.query(selectIngredients);
+
+            const resObj = new Set(res.rows.map((r) => r.sDrugID));
+            const drugsIngredients = Array.from(resObj).map((drugId) => {
+              return res.rows.filter((row) => {
+                return row.sDrugID == drugId;
+              });
+            });
+
+            drugsIngredients.forEach((drugIngredients) => {
+              drugIngredients.isUnique = !compareSets(
+                drugIngredients.map((d) => d.sActiveIngredient),
+                nodes
+              );
+            });
+
+            // if (drugNameTrim == "omeprazole") console.log(drugsIngredients);
+            // console.log(drugsIngredients);
+            const sameDrugIngredients = drugsIngredients.find(
+              (d) => d.isUnique == false
+            );
+            if (!sameDrugIngredients) {
+              const insertDrugValues = [setid, drugNameTrim];
+              if (drugNameTrim == "omeprazole")
+                console.log(sameDrugIngredients);
+
+              await client.query("BEGIN");
+              await client.query(insertDrugText, insertDrugValues);
+              for (var i = 0; i < nodes.length; i++) {
+                await nodes.forEach(async (entry) => {
+                  const insertActiveIngredientValues = [entry];
+                  await client.query(
                     insertActiveIngredientText,
                     insertActiveIngredientValues
                   );
-                  const insertDrugIngredientValues = [setid, entry.name[0]];
-                  client.query(
+                  const insertDrugIngredientValues = [setid, entry];
+                  await client.query(
                     insertDrugIngredientText,
                     insertDrugIngredientValues
                   );
-                  console.log(entry.code[0].$.code, entry.name[0]);
-                }
-              });
+                  await client.query("COMMIT");
+                });
+              }
             }
           } catch (error) {
             console.log(error, setid);
